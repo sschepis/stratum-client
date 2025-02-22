@@ -393,6 +393,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hex",
+ "log",
  "rand",
  "serde",
  "serde_json",

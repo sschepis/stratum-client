@@ -24,6 +24,8 @@ struct JobState {
     job_history: HashMap<String, JobHistory>,
     target: Option<MiningTarget>,
     difficulty_changed: bool, // Track if difficulty has changed since last job
+    extranonce1: Option<String>,      // Server-provided extranonce1
+    extranonce2_size: Option<usize>,  // Server-specified size
 }
 
 impl JobState {
@@ -33,7 +35,14 @@ impl JobState {
             job_history: HashMap::with_capacity(MAX_JOB_HISTORY),
             target: None,
             difficulty_changed: false,
+            extranonce1: None,
+            extranonce2_size: None,
         }
+    }
+
+    fn set_subscription_data(&mut self, extranonce1: String, extranonce2_size: usize) {
+        self.extranonce1 = Some(extranonce1);
+        self.extranonce2_size = Some(extranonce2_size);
     }
 
     fn add_job(&mut self, job: MiningJob) {
@@ -100,12 +109,36 @@ impl JobManager {
         }
     }
 
+    /// Set subscription data received from server
+    pub async fn set_subscription_data(&self, extranonce1: String, extranonce2_size: usize) {
+        let mut state = self.state.lock().await;
+        state.set_subscription_data(extranonce1, extranonce2_size);
+    }
+
     /// Generate a random extranonce2 value of the specified size
     pub fn generate_extranonce2(size: usize) -> String {
         let mut rng = thread_rng();
         let mut bytes = vec![0u8; size];
         rng.fill(&mut bytes[..]);
         hex::encode(bytes)
+    }
+
+    /// Generate a random extranonce2 value using server-specified size
+    pub async fn generate_extranonce2_with_size(&self) -> Result<String, StratumError> {
+        let state = self.state.lock().await;
+        let size = state.extranonce2_size.ok_or_else(||
+            StratumError::Protocol("Extranonce2 size not set - must call set_subscription_data first".into())
+        )?;
+        
+        Ok(Self::generate_extranonce2(size))
+    }
+
+    /// Get the server-provided extranonce1
+    pub async fn get_extranonce1(&self) -> Result<String, StratumError> {
+        let state = self.state.lock().await;
+        state.extranonce1.clone().ok_or_else(||
+            StratumError::Protocol("Extranonce1 not set - must call set_subscription_data first".into())
+        )
     }
 
     /// Validate a mining job notification

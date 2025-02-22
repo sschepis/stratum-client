@@ -26,7 +26,7 @@ pub struct ConnectionConfig {
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            timeout: 5, // 5 second default timeout
+            timeout: 60, // 60 second default timeout for mining pools
             max_retries: 3,
             retry_delay: 1,
             keepalive: true,
@@ -279,55 +279,112 @@ impl StratumConnection {
         }))
     }
 
-    /// Read a single notification from the server
+    /// Read a single notification from the server with retries
     pub async fn read_notification(&self) -> Result<Value, StratumError> {
-        let reader_lock = timeout(
-            Duration::from_secs(self.config.timeout),
-            self.reader.lock()
-        ).await.map_err(|_| StratumError::Protocol("Reader lock timeout in notifications".into()))?;
+        let mut retry_count = 0;
+        let mut last_error = None;
         
-        let mut reader = reader_lock;
-        let mut line = String::new();
-        
-        match timeout(
-            Duration::from_secs(self.config.timeout),
-            reader.read_line(&mut line)
-        ).await {
-            Ok(Ok(0)) => Ok(json!({})), // Empty line, return empty object
-            Ok(Ok(_)) => {
-                match serde_json::from_str(&line.trim()) {
-                    Ok(value) => {
-                        // Update stats
-                        let mut stats = self.stats.lock().await;
-                        stats.messages_received += 1;
-                        stats.last_message_at = Some(Instant::now());
-                        Ok(value)
+        while retry_count < self.config.max_retries {
+            let reader_lock = match timeout(
+                Duration::from_secs(self.config.timeout),
+                self.reader.lock()
+            ).await {
+                Ok(lock) => lock,
+                Err(_) => {
+                    let err = StratumError::Protocol("Reader lock timeout in notifications".into());
+                    last_error = Some(err.clone());
+                    retry_count += 1;
+                    if retry_count == self.config.max_retries {
+                        return Err(err);
                     }
-                    Err(e) => {
-                        if line.trim().is_empty() {
-                            Ok(json!({})) // Empty line, return empty object
-                        } else {
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    continue;
+                }
+            };
+            
+            let mut reader = reader_lock;
+            let mut line = String::new();
+            
+            match timeout(
+                Duration::from_secs(self.config.timeout),
+                reader.read_line(&mut line)
+            ).await {
+                Ok(Ok(0)) => {
+                    // Connection closed
+                    let err = StratumError::Protocol("Connection closed by server".into());
+                    last_error = Some(err.clone());
+                    retry_count += 1;
+                    if retry_count == self.config.max_retries {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    continue;
+                }
+                Ok(Ok(_)) => {
+                    if line.trim().is_empty() {
+                        // Skip empty lines and try again
+                        continue;
+                    }
+                    
+                    println!("Server notification: {}", line.trim());
+                    match serde_json::from_str(&line.trim()) {
+                        Ok(value) => {
+                            // Update stats
+                            let mut stats = self.stats.lock().await;
+                            stats.messages_received += 1;
+                            stats.last_message_at = Some(Instant::now());
+                            return Ok(value);
+                        }
+                        Err(e) => {
                             let err = StratumError::Protocol(format!("Invalid JSON notification: {}", e));
+                            last_error = Some(err.clone());
+                            retry_count += 1;
+                            
+                            // Update error stats
                             let mut stats = self.stats.lock().await;
                             stats.errors += 1;
-                            Err(err)
+                            stats.retries += 1;
+                            
+                            if retry_count == self.config.max_retries {
+                                return Err(err);
+                            }
+                            tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                            continue;
                         }
                     }
                 }
-            }
-            Ok(Err(e)) => {
-                let err = StratumError::Protocol(format!("Read error in notifications: {}", e));
-                let mut stats = self.stats.lock().await;
-                stats.errors += 1;
-                Err(err)
-            }
-            Err(e) => {
-                let err = StratumError::Protocol(format!("Read timeout in notifications: {}", e));
-                let mut stats = self.stats.lock().await;
-                stats.errors += 1;
-                Err(err)
+                Ok(Err(e)) => {
+                    let err = StratumError::Protocol(format!("Read error in notifications: {}", e));
+                    last_error = Some(err.clone());
+                    retry_count += 1;
+                    if retry_count == self.config.max_retries {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    continue;
+                }
+                Err(e) => {
+                    let err = StratumError::Protocol(format!("Read timeout in notifications: {}", e));
+                    last_error = Some(err.clone());
+                    retry_count += 1;
+                    if retry_count == self.config.max_retries {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    continue;
+                }
             }
         }
+        
+        // Update error stats
+        let mut stats = self.stats.lock().await;
+        stats.errors += 1;
+        stats.retries += retry_count as u64;
+        
+        // Return last error or generic max retries error
+        Err(last_error.unwrap_or_else(|| {
+            StratumError::Protocol(format!("Max retries ({}) exceeded", self.config.max_retries))
+        }))
     }
 
     /// Reconnect to the server

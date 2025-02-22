@@ -71,11 +71,17 @@ impl StratumV1Client {
                 // Check if we have both a job and target
                 if let Ok(Some(job)) = client_clone.get_current_job().await {
                     // Get target and check if we need to restart mining
-                    let should_mine = if let Ok(_target) = client_clone.get_target().await {
-                        job.job_id != current_job_id || client_clone.job_manager.should_restart_mining().await
-                    } else {
-                        false
+                    let target = match client_clone.get_target().await {
+                        Ok(target) => target,
+                        Err(e) => {
+                            log::warn!("No mining target available: {}", e);
+                            continue;
+                        }
                     };
+
+                    // Start mining if we have a new job or difficulty changed
+                    let should_mine = job.job_id != current_job_id || client_clone.job_manager.should_restart_mining().await;
+                    log::info!("Starting mining with difficulty {} and job ID: {}", target.difficulty, job.job_id);
 
                     if should_mine {
                         current_job_id = job.job_id.clone();
@@ -96,8 +102,13 @@ impl StratumV1Client {
     }
 
     /// Helper method to generate a unique extranonce2 value
-    pub fn generate_extranonce2(&self, size: usize) -> String {
-        JobManager::generate_extranonce2(size)
+    pub async fn generate_extranonce2(&self) -> Result<String, StratumError> {
+        self.job_manager.generate_extranonce2_with_size().await
+    }
+
+    /// Get the server-provided extranonce1
+    pub async fn get_extranonce1(&self) -> Result<String, StratumError> {
+        self.job_manager.get_extranonce1().await
     }
 
     /// Take the result receiver channel
@@ -150,12 +161,17 @@ impl StratumClient for StratumV1Client {
         let subscription_id = first_detail[1].as_str()
             .ok_or_else(|| StratumError::SubscriptionFailed("Invalid subscription ID format".into()))?
             .to_string();
-        let extranonce1 = subscription[1].as_str().unwrap_or("").to_string();
+        let extranonce1 = subscription[1].as_str()
+            .ok_or_else(|| StratumError::SubscriptionFailed("Invalid extranonce1 format".into()))?
+            .to_string();
         let extranonce2_size = match &subscription[2] {
             Value::Number(n) => n.as_u64().unwrap_or(0) as usize,
             Value::Null => 0,
             _ => subscription[2].as_u64().unwrap_or(0) as usize,
         };
+
+        // Store subscription data in job manager
+        self.job_manager.set_subscription_data(extranonce1.clone(), extranonce2_size).await;
 
         Ok(SubscribeResponse {
             subscription_id,
@@ -186,12 +202,23 @@ impl StratumClient for StratumV1Client {
     /// Returns true if the share was accepted, false if it was rejected.
     /// The share should be generated based on the current mining job and target difficulty.
     async fn submit_share(&mut self, share: Share) -> Result<bool, StratumError> {
+        // Get the server's extranonce1
+        let extranonce1 = self.job_manager.get_extranonce1().await?;
+        
+        // Generate new extranonce2 if not provided
+        let extranonce2 = if share.extranonce2.is_empty() {
+            self.job_manager.generate_extranonce2_with_size().await?
+        } else {
+            share.extranonce2
+        };
+
+        // Submit share with proper parameters
         let response = self.connection.lock().await
             .send_request(
                 MINING_SUBMIT,
                 vec![
                     json!(share.job_id),
-                    json!(share.extranonce2),
+                    json!(extranonce2),
                     json!(share.ntime),
                     json!(share.nonce),
                 ],
@@ -209,7 +236,7 @@ impl StratumClient for StratumV1Client {
     }
 
     /// Process any pending notifications from the mining pool
-    /// 
+    ///
     /// This should be called regularly to receive new jobs and difficulty updates.
     /// It processes one notification at a time, so call it in a loop during mining.
     async fn handle_notifications(&mut self) -> Result<(), StratumError> {
@@ -219,11 +246,15 @@ impl StratumClient for StratumV1Client {
             match method {
                 method if method == MINING_NOTIFY => {
                     if let Some(params) = notification.get("params").and_then(Value::as_array) {
+                        log::info!("Received new mining job with ID: {}",
+                            params.get(0).and_then(Value::as_str).unwrap_or("unknown"));
                         self.job_manager.handle_job_notification(params).await?;
                     }
                 }
                 method if method == MINING_SET_DIFFICULTY => {
                     if let Some(params) = notification.get("params").and_then(Value::as_array) {
+                        log::info!("Received new difficulty: {}",
+                            params.get(0).and_then(Value::as_f64).unwrap_or(0.0));
                         self.job_manager.handle_difficulty_notification(params).await?;
                     }
                 }
