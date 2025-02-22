@@ -23,6 +23,7 @@ struct JobState {
     current_job: Option<MiningJob>,
     job_history: HashMap<String, JobHistory>,
     target: Option<MiningTarget>,
+    difficulty_changed: bool, // Track if difficulty has changed since last job
 }
 
 impl JobState {
@@ -31,6 +32,7 @@ impl JobState {
             current_job: None,
             job_history: HashMap::with_capacity(MAX_JOB_HISTORY),
             target: None,
+            difficulty_changed: false,
         }
     }
 
@@ -63,14 +65,29 @@ impl JobState {
 
         // Update current job
         self.current_job = Some(job);
+        // Reset difficulty change flag since we're starting a new job
+        self.difficulty_changed = false;
     }
 
     fn get_job(&self, job_id: &str) -> Option<&MiningJob> {
         self.job_history.get(job_id).map(|h| &h.job)
     }
+
+    fn set_target(&mut self, target: MiningTarget) {
+        // If we already have a target, mark that difficulty has changed
+        if self.target.is_some() {
+            self.difficulty_changed = true;
+        }
+        self.target = Some(target);
+    }
+
+    fn should_restart_mining(&self) -> bool {
+        self.difficulty_changed && self.current_job.is_some()
+    }
 }
 
 /// Manages mining jobs and targets with validation and history tracking
+#[derive(Clone)]
 pub struct JobManager {
     state: Arc<Mutex<JobState>>,
 }
@@ -199,7 +216,7 @@ impl JobManager {
 
         let final_target = Self::calculate_target(difficulty);
         let mut state = self.state.lock().await;
-        state.target = Some(MiningTarget {
+        state.set_target(MiningTarget {
             difficulty,
             target: hex::encode(&final_target),
         });
@@ -214,8 +231,20 @@ impl JobManager {
 
     /// Get the current target if available
     pub async fn get_target(&self) -> Result<MiningTarget, StratumError> {
-        self.state.lock().await.target.clone()
-            .ok_or_else(|| StratumError::Protocol("No target available".into()))
+        // Default to difficulty 1 if no target is set
+        let state = self.state.lock().await;
+        Ok(state.target.clone().unwrap_or_else(|| {
+            let final_target = Self::calculate_target(1.0);
+            MiningTarget {
+                difficulty: 1.0,
+                target: hex::encode(&final_target),
+            }
+        }))
+    }
+
+    /// Check if mining should be restarted due to difficulty change
+    pub async fn should_restart_mining(&self) -> bool {
+        self.state.lock().await.should_restart_mining()
     }
 
     /// Validate a share submission
@@ -391,5 +420,27 @@ mod tests {
         let extranonce2 = JobManager::generate_extranonce2(size);
         assert_eq!(extranonce2.len(), size * 2); // Hex encoded
         assert!(hex::decode(&extranonce2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_difficulty_change_detection() {
+        let manager = JobManager::new();
+
+        // Set initial difficulty
+        manager.handle_difficulty_notification(&[json!(1.0)]).await.unwrap();
+        assert!(!manager.should_restart_mining().await);
+
+        // Add a job
+        let params = create_valid_job_params();
+        manager.handle_job_notification(&params).await.unwrap();
+        assert!(!manager.should_restart_mining().await);
+
+        // Change difficulty
+        manager.handle_difficulty_notification(&[json!(2.0)]).await.unwrap();
+        assert!(manager.should_restart_mining().await);
+
+        // Add new job should reset the restart flag
+        manager.handle_job_notification(&params).await.unwrap();
+        assert!(!manager.should_restart_mining().await);
     }
 }

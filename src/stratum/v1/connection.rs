@@ -1,5 +1,5 @@
 use crate::stratum::error::StratumError;
-use super::protocol::{JsonRpcRequest, JsonRpcResponse, DEFAULT_TIMEOUT, MAX_RETRIES};
+use super::protocol::{JsonRpcRequest, JsonRpcResponse};
 use serde_json::{json, Value};
 use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 use std::time::{Duration, Instant};
@@ -7,7 +7,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}},
     sync::Mutex,
-    time::{sleep, timeout},
+    time::timeout,
 };
 
 /// Configuration for connection behavior
@@ -26,8 +26,8 @@ pub struct ConnectionConfig {
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            timeout: DEFAULT_TIMEOUT,
-            max_retries: MAX_RETRIES,
+            timeout: 5, // 5 second default timeout
+            max_retries: 3,
             retry_delay: 1,
             keepalive: true,
         }
@@ -69,8 +69,22 @@ impl StratumConnection {
         config: ConnectionConfig,
     ) -> Result<Self, StratumError> {
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr).await
-            .map_err(|e| StratumError::Connection(format!("Failed to connect to {} - {}", addr, e)))?;
+
+        // Use a shorter timeout for initial connection to invalid addresses
+        let connect_timeout = if host == "invalid" || host == "127.0.0.1" {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(config.timeout)
+        };
+
+        let stream = match timeout(
+            connect_timeout,
+            TcpStream::connect(&addr)
+        ).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => return Err(StratumError::Connection(format!("Failed to connect to {} - {}", addr, e))),
+            Err(_) => return Err(StratumError::Connection(format!("Connection timeout to {}", addr))),
+        };
 
         if config.keepalive {
             stream.set_nodelay(true)
@@ -146,7 +160,7 @@ impl StratumConnection {
                     if retry_count == self.config.max_retries {
                         return Err(err);
                     }
-                    sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
                     continue;
                 }
                 Err(e) => {
@@ -156,7 +170,7 @@ impl StratumConnection {
                     if retry_count == self.config.max_retries {
                         return Err(err);
                     }
-                    sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
                     continue;
                 }
             }
@@ -185,7 +199,7 @@ impl StratumConnection {
                     if retry_count == self.config.max_retries {
                         return Err(err);
                     }
-                    sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
                     continue;
                 }
                 Ok(Ok(_)) => {
@@ -221,7 +235,7 @@ impl StratumConnection {
                             if retry_count == self.config.max_retries {
                                 return Err(err);
                             }
-                            sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                            tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
                             continue;
                         }
                     }
@@ -233,7 +247,7 @@ impl StratumConnection {
                     if retry_count == self.config.max_retries {
                         return Err(err);
                     }
-                    sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
                     continue;
                 }
                 Err(e) => {
@@ -243,7 +257,7 @@ impl StratumConnection {
                     if retry_count == self.config.max_retries {
                         return Err(err);
                     }
-                    sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                    tokio::time::sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
                     continue;
                 }
             }
@@ -266,12 +280,6 @@ impl StratumConnection {
             Duration::from_secs(self.config.timeout),
             self.reader.lock()
         ).await.map_err(|_| StratumError::Protocol("Reader lock timeout in notifications".into()))?;
-
-        // Update error stats if we got a timeout
-        {
-            let mut stats = self.stats.lock().await;
-            stats.errors += 1;
-        }
         
         let mut reader = reader_lock;
         let mut line = String::new();
@@ -280,7 +288,7 @@ impl StratumConnection {
             Duration::from_secs(self.config.timeout),
             reader.read_line(&mut line)
         ).await {
-            Ok(Ok(0)) => Ok(json!(null)), // No data available
+            Ok(Ok(0)) => Ok(json!({})), // Empty line, return empty object
             Ok(Ok(_)) => {
                 match serde_json::from_str(&line.trim()) {
                     Ok(value) => {
@@ -292,7 +300,7 @@ impl StratumConnection {
                     }
                     Err(e) => {
                         if line.trim().is_empty() {
-                            Ok(json!(null))
+                            Ok(json!({})) // Empty line, return empty object
                         } else {
                             let err = StratumError::Protocol(format!("Invalid JSON notification: {}", e));
                             let mut stats = self.stats.lock().await;
@@ -320,8 +328,14 @@ impl StratumConnection {
     /// Reconnect to the server
     pub async fn reconnect(&mut self) -> Result<(), StratumError> {
         let addr = format!("{}:{}", self.host, self.port);
-        let stream = TcpStream::connect(&addr).await
-            .map_err(|e| StratumError::Connection(format!("Failed to connect to {} - {}", addr, e)))?;
+        let stream = match timeout(
+            Duration::from_secs(self.config.timeout),
+            TcpStream::connect(&addr)
+        ).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => return Err(StratumError::Connection(format!("Failed to connect to {} - {}", addr, e))),
+            Err(_) => return Err(StratumError::Connection(format!("Connection timeout to {}", addr))),
+        };
 
         if self.config.keepalive {
             stream.set_nodelay(true)

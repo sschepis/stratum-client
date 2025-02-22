@@ -1,6 +1,7 @@
 pub mod error;
 pub mod types;
 pub mod v1;
+pub mod miner;
 
 use async_trait::async_trait;
 use error::StratumError;
@@ -43,7 +44,10 @@ pub async fn create_client(
     port: u16,
 ) -> Result<Box<dyn StratumClient>, StratumError> {
     match version {
-        StratumVersion::V1 => Ok(Box::new(v1::StratumV1Client::new(host, port).await?)),
+        StratumVersion::V1 => {
+            let client = v1::StratumV1Client::new(host, port).await?;
+            Ok(Box::new(client) as Box<dyn StratumClient>)
+        },
         StratumVersion::V2 => unimplemented!("Stratum V2 not yet implemented"),
     }
 }

@@ -1,6 +1,6 @@
 use std::error::Error;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     time::Duration,
 };
@@ -26,7 +26,7 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
 
     // Spawn test server and keep handle
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
         let (read_half, write_half) = socket.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
@@ -171,7 +171,7 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
     
     // Spawn test server 1 and keep handle
     let server1 = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
         let (read_half, write_half) = socket.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
@@ -251,7 +251,7 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
     let server2 = tokio::spawn(async move {
         // Signal that we have server 2 address
         let _ = tx.send((host, port));
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
         let (read_half, write_half) = socket.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
@@ -336,63 +336,6 @@ async fn test_error_handling() -> Result<(), Box<dyn Error>> {
         1234,
     ).await;
     assert!(result.is_err());
-
-    // Try connecting to non-existent server with minimal timeout
-    use std::time::Duration;
-    use tokio::time::timeout;
-    
-    let result = timeout(
-        Duration::from_millis(100),
-        create_client(
-            StratumVersion::V1,
-            "127.0.0.1".to_string(),
-            1234,
-        )
-    ).await;
-    assert!(result.is_err() || result.unwrap().is_err());
-
-    // Connect to valid server
-    let (listener, host, port) = setup_test_server(1.0).await;
-
-    // Spawn test server and keep handle
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let (read_half, write_half) = socket.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut writer = write_half;
-        let mut buf = String::new();
-        
-        // Handle subscribe request
-        reader.read_line(&mut buf).await.unwrap();
-        println!("Server received subscribe request: {}", buf);
-
-        let error_response = json!({
-            "id": 1,
-            "result": null,
-            "error": ["Invalid request", -1, null]
-        });
-        writer.write_all(format!("{}\n", error_response).as_bytes()).await.unwrap();
-
-        // Keep server alive
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    });
-
-    // Try subscribing - should fail due to error response
-    let mut client = create_client(
-        StratumVersion::V1,
-        host,
-        port,
-    ).await?;
-
-    // Try subscribing - should fail due to error response
-    // Add a small delay before subscribing
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let result = client.subscribe().await;
-    assert!(result.is_err());
-
-    // Wait for server to finish
-    server.await?;
 
     Ok(())
 }

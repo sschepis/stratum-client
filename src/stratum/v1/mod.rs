@@ -2,14 +2,14 @@ mod protocol;
 mod connection;
 mod jobs;
 
-use crate::stratum::{error::StratumError, types::*, StratumClient};
+use crate::stratum::{error::StratumError, types::*, StratumClient, miner::Miner};
 use async_trait::async_trait;
 use connection::StratumConnection;
 use jobs::JobManager;
 use protocol::{CLIENT_VERSION, MINING_AUTHORIZE, MINING_NOTIFY, MINING_SET_DIFFICULTY, MINING_SUBSCRIBE, MINING_SUBMIT};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 /// A Stratum V1 protocol client implementation
 /// 
@@ -19,24 +19,36 @@ use tokio::sync::Mutex;
 /// - Subscription and authorization
 /// - Job notifications and difficulty updates
 /// - Share submission
+#[derive(Clone)]
 pub struct StratumV1Client {
     connection: Arc<Mutex<StratumConnection>>,
     job_manager: JobManager,
     server_info: Arc<Mutex<Option<ServerInfo>>>,
+    result_sender: Arc<Mutex<Option<mpsc::Sender<Result<u32, StratumError>>>>>,
+    result_receiver: Arc<Mutex<Option<mpsc::Receiver<Result<u32, StratumError>>>>>,
 }
 
 impl StratumV1Client {
     /// Creates a new Stratum V1 client and connects to the specified mining pool
     pub async fn new(host: String, port: u16) -> Result<Self, StratumError> {
+        let (sender, receiver) = mpsc::channel(100);
         Ok(Self {
             connection: Arc::new(Mutex::new(StratumConnection::new(host, port).await?)),
             job_manager: JobManager::new(),
             server_info: Arc::new(Mutex::new(None)),
+            result_sender: Arc::new(Mutex::new(Some(sender))),
+            result_receiver: Arc::new(Mutex::new(Some(receiver))),
         })
     }
 
     /// Convenience method to connect and authenticate with a mining pool in one call
-    pub async fn connect_and_auth(host: String, port: u16, username: &str, password: &str) -> Result<Self, StratumError> {
+    pub async fn connect_and_auth(
+        host: String,
+        port: u16,
+        username: &str,
+        password: &str,
+        miner: impl Miner + Send + 'static,
+    ) -> Result<Self, StratumError> {
         let mut client = Self::new(host, port).await?;
         
         // Subscribe first
@@ -49,6 +61,36 @@ impl StratumV1Client {
                 format!("Pool rejected credentials for user {}", username)
             ));
         }
+
+        // Start mining task
+        let mut client_clone = client.clone();
+        tokio::spawn(async move {
+            let mut current_job_id = String::new();
+            
+            loop {
+                // Check if we have both a job and target
+                if let Ok(Some(job)) = client_clone.get_current_job().await {
+                    // Get target and check if we need to restart mining
+                    let should_mine = if let Ok(_target) = client_clone.get_target().await {
+                        job.job_id != current_job_id || client_clone.job_manager.should_restart_mining().await
+                    } else {
+                        false
+                    };
+
+                    if should_mine {
+                        current_job_id = job.job_id.clone();
+                        
+                        // Start mining with new job/target
+                        if let Ok(nonce) = miner.on_job_received(job).await {
+                            if let Some(sender) = &*client_clone.result_sender.lock().await {
+                                let _ = sender.send(Ok(nonce)).await;
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
         
         Ok(client)
     }
@@ -56,6 +98,11 @@ impl StratumV1Client {
     /// Helper method to generate a unique extranonce2 value
     pub fn generate_extranonce2(&self, size: usize) -> String {
         JobManager::generate_extranonce2(size)
+    }
+
+    /// Take the result receiver channel
+    pub async fn take_result_receiver(&mut self) -> Option<mpsc::Receiver<Result<u32, StratumError>>> {
+        self.result_receiver.lock().await.take()
     }
 }
 
@@ -153,7 +200,7 @@ impl StratumClient for StratumV1Client {
         Ok(response.result.unwrap_or(json!(false)).as_bool().unwrap_or(false))
     }
 
-    /// Get the current mining job if one is available
+    /// Get the current mining job if available
     /// 
     /// New jobs are received through notifications, so this returns None if no job
     /// has been received yet. Use handle_notifications() to process new jobs.
@@ -170,12 +217,12 @@ impl StratumClient for StratumV1Client {
         
         if let Some(method) = notification.get("method").and_then(Value::as_str) {
             match method {
-                MINING_NOTIFY => {
+                method if method == MINING_NOTIFY => {
                     if let Some(params) = notification.get("params").and_then(Value::as_array) {
                         self.job_manager.handle_job_notification(params).await?;
                     }
                 }
-                MINING_SET_DIFFICULTY => {
+                method if method == MINING_SET_DIFFICULTY => {
                     if let Some(params) = notification.get("params").and_then(Value::as_array) {
                         self.job_manager.handle_difficulty_notification(params).await?;
                     }
