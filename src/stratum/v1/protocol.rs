@@ -74,7 +74,9 @@ impl fmt::Display for JsonRpcRequest {
         write!(
             f,
             "JsonRpcRequest {{ id: {}, method: {}, params: {} }}",
-            self.id, self.method, serde_json::to_string(&self.params).unwrap()
+            self.id,
+            self.method,
+            serde_json::to_string(&self.params).unwrap()
         )
     }
 }
@@ -110,7 +112,9 @@ impl JsonRpcResponse {
 
     /// Get the error message if present
     pub fn error_message(&self) -> Option<String> {
-        self.error.as_ref().and_then(|e| e.as_str().map(String::from))
+        self.error
+            .as_ref()
+            .and_then(|e| e.as_str().map(String::from))
     }
 }
 
@@ -169,12 +173,7 @@ mod tests {
         assert_eq!(req.method, MINING_SUBMIT);
         assert_eq!(
             req.params,
-            vec![
-                json!("job1"),
-                json!("ext2"),
-                json!("time"),
-                json!("nonce")
-            ]
+            vec![json!("job1"), json!("ext2"), json!("time"), json!("nonce")]
         );
     }
 

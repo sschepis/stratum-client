@@ -1,3 +1,4 @@
+use rand::{thread_rng, Rng};
 use serde_json::{json, Value};
 use std::{error::Error, sync::Arc};
 use tokio::{
@@ -6,7 +7,6 @@ use tokio::{
     sync::{mpsc, Mutex},
     time::Duration,
 };
-use rand::{thread_rng, Rng};
 
 struct MiningSession {
     difficulty: f64,
@@ -21,7 +21,7 @@ impl MiningSession {
         let mut rng = thread_rng();
         let subscription_id = format!("{:016x}", rng.gen::<u64>());
         let extranonce1 = format!("{:08x}", rng.gen::<u32>());
-        
+
         Self {
             difficulty,
             extranonce1,
@@ -34,7 +34,7 @@ impl MiningSession {
     fn generate_job(&mut self) -> Value {
         let mut rng = thread_rng();
         self.current_job_id += 1;
-        
+
         json!({
             "method": "mining.notify",
             "params": [
@@ -52,21 +52,22 @@ impl MiningSession {
     }
 }
 
-async fn handle_client(
-    stream: TcpStream,
-    difficulty: f64,
-) -> Result<(), Box<dyn Error>> {
+async fn handle_client(stream: TcpStream, difficulty: f64) -> Result<(), Box<dyn Error>> {
     let (reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
     let mut reader = BufReader::new(reader);
     let session = Arc::new(Mutex::new(MiningSession::new(difficulty)));
-    
+
     // Send initial difficulty
     let difficulty_notify = json!({
         "method": "mining.set_difficulty",
         "params": [difficulty]
     });
-    writer.lock().await.write_all(format!("{}\n", difficulty_notify).as_bytes()).await?;
+    writer
+        .lock()
+        .await
+        .write_all(format!("{}\n", difficulty_notify).as_bytes())
+        .await?;
 
     // Spawn job generation task
     let session_clone = session.clone();
@@ -75,7 +76,11 @@ async fn handle_client(
         loop {
             let job = session_clone.lock().await.generate_job();
             if let Ok(job_str) = serde_json::to_string(&job) {
-                let _ = writer_clone.lock().await.write_all(format!("{}\n", job_str).as_bytes()).await;
+                let _ = writer_clone
+                    .lock()
+                    .await
+                    .write_all(format!("{}\n", job_str).as_bytes())
+                    .await;
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -137,7 +142,11 @@ async fn handle_client(
             }),
         };
 
-        writer.lock().await.write_all(format!("{}\n", response).as_bytes()).await?;
+        writer
+            .lock()
+            .await
+            .write_all(format!("{}\n", response).as_bytes())
+            .await?;
     }
 
     Ok(())
@@ -151,13 +160,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|d| d.parse::<f64>().ok())
         .unwrap_or(1.0);
 
-    println!("Starting test mining pool on {} with difficulty {}", addr, difficulty);
+    println!(
+        "Starting test mining pool on {} with difficulty {}",
+        addr, difficulty
+    );
     let listener = TcpListener::bind(addr).await?;
 
     loop {
         let (socket, addr) = listener.accept().await?;
         println!("New connection from {}", addr);
-        
+
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, difficulty).await {
                 eprintln!("Client error: {}", e);

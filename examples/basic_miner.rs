@@ -1,3 +1,4 @@
+use rust_stratum::stratum::v1::jobs::TestMiner;
 use rust_stratum::stratum::{
     create_client,
     types::{Share, StratumVersion},
@@ -16,13 +17,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let password = std::env::var("POOL_PASS").unwrap_or_else(|_| "x".to_string());
 
     println!("Connecting to stratum+tcp://{}:{}", host, port);
-    
+
     // Create and connect a client
-    let mut client = create_client(
-        StratumVersion::V1,
-        host.clone(),
-        port,
-    ).await?;
+    let mut client = create_client(StratumVersion::V1, host.clone(), port, TestMiner).await?;
 
     // Subscribe to the pool
     let subscription = client.subscribe().await?;
@@ -76,15 +73,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ntime: job.ntime,
                         nonce: format!("{:08x}", rand::random::<u32>()),
                     };
-                    
+
                     match client.submit_share(share).await {
                         Ok(accepted) => {
                             if accepted {
                                 shares_accepted += 1;
-                                println!("Share accepted! ({} accepted, {} rejected)", shares_accepted, shares_rejected);
+                                println!(
+                                    "Share accepted! ({} accepted, {} rejected)",
+                                    shares_accepted, shares_rejected
+                                );
                             } else {
                                 shares_rejected += 1;
-                                println!("Share rejected ({} accepted, {} rejected)", shares_accepted, shares_rejected);
+                                println!(
+                                    "Share rejected ({} accepted, {} rejected)",
+                                    shares_accepted, shares_rejected
+                                );
                             }
                         }
                         Err(e) => {

@@ -12,6 +12,7 @@ pub struct MiningJob {
     pub nbits: String,
     pub ntime: String,
     pub clean_jobs: bool,
+    pub target: Option<MiningTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

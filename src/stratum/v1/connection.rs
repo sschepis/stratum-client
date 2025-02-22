@@ -1,11 +1,17 @@
-use crate::stratum::error::StratumError;
 use super::protocol::{JsonRpcRequest, JsonRpcResponse, DEFAULT_TIMEOUT, MAX_RETRIES};
+use crate::stratum::error::StratumError;
 use serde_json::{json, Value};
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
     sync::Mutex,
     time::{sleep, timeout},
 };
@@ -69,16 +75,18 @@ impl StratumConnection {
         config: ConnectionConfig,
     ) -> Result<Self, StratumError> {
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr).await
-            .map_err(|e| StratumError::Connection(format!("Failed to connect to {} - {}", addr, e)))?;
+        let stream = TcpStream::connect(&addr).await.map_err(|e| {
+            StratumError::Connection(format!("Failed to connect to {} - {}", addr, e))
+        })?;
 
         if config.keepalive {
-            stream.set_nodelay(true)
+            stream
+                .set_nodelay(true)
                 .map_err(|e| StratumError::Connection(format!("Failed to set nodelay - {}", e)))?;
         }
-        
+
         let (read_half, write_half) = stream.into_split();
-        
+
         let connection = Self {
             writer: Arc::new(Mutex::new(write_half)),
             reader: Arc::new(Mutex::new(BufReader::new(read_half))),
@@ -101,10 +109,14 @@ impl StratumConnection {
     }
 
     /// Send a request and wait for response with automatic retries
-    pub async fn send_request(&self, method: &str, params: Vec<Value>) -> Result<JsonRpcResponse, StratumError> {
+    pub async fn send_request(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<JsonRpcResponse, StratumError> {
         let mut retry_count = 0;
         let mut last_error = None;
-        
+
         while retry_count < self.config.max_retries {
             let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
             let request = JsonRpcRequest {
@@ -113,26 +125,28 @@ impl StratumConnection {
                 params: params.clone(),
             };
 
-            let json = serde_json::to_string(&request)
-                .map_err(|e| StratumError::Protocol(format!("Failed to serialize request - {}", e)))?;
-            
-            // Try to acquire locks with timeout
-            let writer_lock = timeout(
-                Duration::from_secs(self.config.timeout),
-                self.writer.lock()
-            ).await.map_err(|_| {
-                let err = StratumError::Protocol("Writer lock timeout".into());
-                last_error = Some(err.clone());
-                err
+            let json = serde_json::to_string(&request).map_err(|e| {
+                StratumError::Protocol(format!("Failed to serialize request - {}", e))
             })?;
-            
+
+            // Try to acquire locks with timeout
+            let writer_lock = timeout(Duration::from_secs(self.config.timeout), self.writer.lock())
+                .await
+                .map_err(|_| {
+                    let err = StratumError::Protocol("Writer lock timeout".into());
+                    last_error = Some(err.clone());
+                    err
+                })?;
+
             let mut writer = writer_lock;
-            
+
             // Send with timeout
             match timeout(
                 Duration::from_secs(self.config.timeout),
-                writer.write_all(format!("{}\n", json).as_bytes())
-            ).await {
+                writer.write_all(format!("{}\n", json).as_bytes()),
+            )
+            .await
+            {
                 Ok(Ok(_)) => {
                     // Update stats
                     let mut stats = self.stats.lock().await;
@@ -161,23 +175,24 @@ impl StratumConnection {
                 }
             }
 
-            let reader_lock = timeout(
-                Duration::from_secs(self.config.timeout),
-                self.reader.lock()
-            ).await.map_err(|_| {
-                let err = StratumError::Protocol("Reader lock timeout".into());
-                last_error = Some(err.clone());
-                err
-            })?;
-            
+            let reader_lock = timeout(Duration::from_secs(self.config.timeout), self.reader.lock())
+                .await
+                .map_err(|_| {
+                    let err = StratumError::Protocol("Reader lock timeout".into());
+                    last_error = Some(err.clone());
+                    err
+                })?;
+
             let mut reader = reader_lock;
             let mut line = String::new();
-            
+
             // Read with timeout
             match timeout(
                 Duration::from_secs(self.config.timeout),
-                reader.read_line(&mut line)
-            ).await {
+                reader.read_line(&mut line),
+            )
+            .await
+            {
                 Ok(Ok(0)) => {
                     let err = StratumError::Protocol("Empty response from server".into());
                     last_error = Some(err.clone());
@@ -194,14 +209,17 @@ impl StratumConnection {
                             let response: JsonRpcResponse = response;
                             println!("Client received response: {}", line.trim());
                             println!("Parsed response: {:?}", response);
-                            
+
                             // Update stats
                             let mut stats = self.stats.lock().await;
                             stats.messages_received += 1;
                             stats.last_message_at = Some(Instant::now());
-                            
+
                             if let Some(error) = response.error.as_ref() {
-                                let err = StratumError::Protocol(serde_json::to_string(error).unwrap_or_else(|_| error.to_string()));
+                                let err = StratumError::Protocol(
+                                    serde_json::to_string(error)
+                                        .unwrap_or_else(|_| error.to_string()),
+                                );
                                 return Err(err);
                             }
                             return Ok(response);
@@ -209,7 +227,8 @@ impl StratumConnection {
                         Err(e) => {
                             println!("Error parsing response: {}", e);
                             println!("Raw response line: {}", line);
-                            let err = StratumError::Protocol(format!("Invalid JSON response: {}", e));
+                            let err =
+                                StratumError::Protocol(format!("Invalid JSON response: {}", e));
                             last_error = Some(err.clone());
                             retry_count += 1;
 
@@ -221,7 +240,8 @@ impl StratumConnection {
                             if retry_count == self.config.max_retries {
                                 return Err(err);
                             }
-                            sleep(Duration::from_secs(self.config.retry_delay << retry_count)).await;
+                            sleep(Duration::from_secs(self.config.retry_delay << retry_count))
+                                .await;
                             continue;
                         }
                     }
@@ -248,7 +268,7 @@ impl StratumConnection {
                 }
             }
         }
-        
+
         // Update error stats
         let mut stats = self.stats.lock().await;
         stats.errors += 1;
@@ -256,30 +276,34 @@ impl StratumConnection {
 
         // Return last error or generic max retries error
         Err(last_error.unwrap_or_else(|| {
-            StratumError::Protocol(format!("Max retries ({}) exceeded", self.config.max_retries))
+            StratumError::Protocol(format!(
+                "Max retries ({}) exceeded",
+                self.config.max_retries
+            ))
         }))
     }
 
     /// Read a single notification from the server
     pub async fn read_notification(&self) -> Result<Value, StratumError> {
-        let reader_lock = timeout(
-            Duration::from_secs(self.config.timeout),
-            self.reader.lock()
-        ).await.map_err(|_| StratumError::Protocol("Reader lock timeout in notifications".into()))?;
+        let reader_lock = timeout(Duration::from_secs(self.config.timeout), self.reader.lock())
+            .await
+            .map_err(|_| StratumError::Protocol("Reader lock timeout in notifications".into()))?;
 
         // Update error stats if we got a timeout
         {
             let mut stats = self.stats.lock().await;
             stats.errors += 1;
         }
-        
+
         let mut reader = reader_lock;
         let mut line = String::new();
-        
+
         match timeout(
             Duration::from_secs(self.config.timeout),
-            reader.read_line(&mut line)
-        ).await {
+            reader.read_line(&mut line),
+        )
+        .await
+        {
             Ok(Ok(0)) => Ok(json!(null)), // No data available
             Ok(Ok(_)) => {
                 match serde_json::from_str(&line.trim()) {
@@ -294,7 +318,8 @@ impl StratumConnection {
                         if line.trim().is_empty() {
                             Ok(json!(null))
                         } else {
-                            let err = StratumError::Protocol(format!("Invalid JSON notification: {}", e));
+                            let err =
+                                StratumError::Protocol(format!("Invalid JSON notification: {}", e));
                             let mut stats = self.stats.lock().await;
                             stats.errors += 1;
                             Err(err)
@@ -320,18 +345,20 @@ impl StratumConnection {
     /// Reconnect to the server
     pub async fn reconnect(&mut self) -> Result<(), StratumError> {
         let addr = format!("{}:{}", self.host, self.port);
-        let stream = TcpStream::connect(&addr).await
-            .map_err(|e| StratumError::Connection(format!("Failed to connect to {} - {}", addr, e)))?;
+        let stream = TcpStream::connect(&addr).await.map_err(|e| {
+            StratumError::Connection(format!("Failed to connect to {} - {}", addr, e))
+        })?;
 
         if self.config.keepalive {
-            stream.set_nodelay(true)
+            stream
+                .set_nodelay(true)
                 .map_err(|e| StratumError::Connection(format!("Failed to set nodelay - {}", e)))?;
         }
-        
+
         let (read_half, write_half) = stream.into_split();
         *self.writer.lock().await = write_half;
         *self.reader.lock().await = BufReader::new(read_half);
-        
+
         // Reset stats
         let mut stats = self.stats.lock().await;
         *stats = ConnectionStats {
@@ -346,11 +373,11 @@ impl StratumConnection {
     pub async fn close(&mut self) -> Result<(), StratumError> {
         let mut writer = self.writer.lock().await;
         writer.shutdown().await?;
-        
+
         // Clear stats
         let mut stats = self.stats.lock().await;
         stats.connected_since = None;
-        
+
         Ok(())
     }
 }
@@ -358,8 +385,8 @@ impl StratumConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     async fn setup_test_server() -> (TcpListener, String, u16) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -377,22 +404,27 @@ mod tests {
         };
 
         let (listener, host, port) = setup_test_server().await;
-        
+
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0; 1024];
             socket.read(&mut buf).await.unwrap();
-            
+
             let response = json!({
                 "id": 1,
                 "result": true,
                 "error": null
             });
-            
-            socket.write_all(format!("{}\n", response).as_bytes()).await.unwrap();
+
+            socket
+                .write_all(format!("{}\n", response).as_bytes())
+                .await
+                .unwrap();
         });
 
-        let conn = StratumConnection::with_config(host, port, config).await.unwrap();
+        let conn = StratumConnection::with_config(host, port, config)
+            .await
+            .unwrap();
         assert_eq!(conn.config.timeout, 10);
         assert_eq!(conn.config.max_retries, 5);
         assert_eq!(conn.config.retry_delay, 2);
@@ -402,23 +434,26 @@ mod tests {
     #[tokio::test]
     async fn test_connection_stats() {
         let (listener, host, port) = setup_test_server().await;
-        
+
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0; 1024];
             socket.read(&mut buf).await.unwrap();
-            
+
             let response = json!({
                 "id": 1,
                 "result": true,
                 "error": null
             });
-            
-            socket.write_all(format!("{}\n", response).as_bytes()).await.unwrap();
+
+            socket
+                .write_all(format!("{}\n", response).as_bytes())
+                .await
+                .unwrap();
         });
 
         let conn = StratumConnection::new(host, port).await.unwrap();
-        
+
         // Check initial stats
         let stats = conn.stats().await;
         assert_eq!(stats.messages_sent, 0);
@@ -426,10 +461,10 @@ mod tests {
         assert_eq!(stats.errors, 0);
         assert_eq!(stats.retries, 0);
         assert!(stats.connected_since.is_some());
-        
+
         // Send a request
         conn.send_request("test", vec![]).await.unwrap();
-        
+
         // Check updated stats
         let stats = conn.stats().await;
         assert_eq!(stats.messages_sent, 1);
@@ -441,22 +476,22 @@ mod tests {
     #[tokio::test]
     async fn test_connection_errors() {
         let (listener, host, port) = setup_test_server().await;
-        
+
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0; 1024];
             socket.read(&mut buf).await.unwrap();
-            
+
             // Send invalid JSON to trigger error
             socket.write_all(b"invalid json\n").await.unwrap();
         });
 
         let conn = StratumConnection::new(host, port).await.unwrap();
-        
+
         // Send request and expect error
         let result = conn.send_request("test", vec![]).await;
         assert!(result.is_err());
-        
+
         // Check error stats
         let stats = conn.stats().await;
         assert!(stats.errors > 0);
@@ -465,34 +500,37 @@ mod tests {
     #[tokio::test]
     async fn test_reconnection() {
         let (listener, host, port) = setup_test_server().await;
-        
+
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             drop(socket); // Force disconnect
-            
+
             // Accept new connection after reconnect
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0; 1024];
             socket.read(&mut buf).await.unwrap();
-            
+
             let response = json!({
                 "id": 1,
                 "result": true,
                 "error": null
             });
-            
-            socket.write_all(format!("{}\n", response).as_bytes()).await.unwrap();
+
+            socket
+                .write_all(format!("{}\n", response).as_bytes())
+                .await
+                .unwrap();
         });
 
         let mut conn = StratumConnection::new(host, port).await.unwrap();
-        
+
         // Force a reconnection
         conn.reconnect().await.unwrap();
-        
+
         // Verify connection works after reconnect
         let result = conn.send_request("test", vec![]).await;
         assert!(result.is_ok());
-        
+
         // Check stats were reset
         let stats = conn.stats().await;
         assert_eq!(stats.messages_sent, 1);

@@ -1,12 +1,13 @@
+use serde_json::json;
 use std::error::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     time::Duration,
 };
-use serde_json::json;
 
 // Import from our crate
+use rust_stratum::stratum::v1::jobs::TestMiner;
 use rust_stratum::stratum::{
     create_client,
     types::{Share, StratumVersion},
@@ -31,10 +32,10 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
         let mut buf = String::new();
-        
+
         // Handle subscribe request
         reader.read_line(&mut buf).await.unwrap();
-        
+
         let subscribe_response = json!({
             "id": 1,
             "result": [
@@ -47,7 +48,10 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
             ],
             "error": null
         });
-        writer.write_all(format!("{}\n", subscribe_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", subscribe_response).as_bytes())
+            .await
+            .unwrap();
 
         // Handle authorize request
         buf.clear();
@@ -57,14 +61,10 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
             "result": true,
             "error": null
         });
-        writer.write_all(format!("{}\n", auth_response).as_bytes()).await.unwrap();
-
-        // Send difficulty notification
-        let difficulty_notify = json!({
-            "method": "mining.set_difficulty",
-            "params": [difficulty]
-        });
-        writer.write_all(format!("{}\n", difficulty_notify).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", auth_response).as_bytes())
+            .await
+            .unwrap();
 
         // Send job notification
         let job = json!({
@@ -81,7 +81,20 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
                 true
             ]
         });
-        writer.write_all(format!("{}\n", job).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", job).as_bytes())
+            .await
+            .unwrap();
+
+        // Send difficulty notification
+        let difficulty_notify = json!({
+            "method": "mining.set_difficulty",
+            "params": [difficulty]
+        });
+        writer
+            .write_all(format!("{}\n", difficulty_notify).as_bytes())
+            .await
+            .unwrap();
 
         // Handle share submission
         buf.clear();
@@ -91,18 +104,17 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
             "result": true,
             "error": null
         });
-        writer.write_all(format!("{}\n", submit_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", submit_response).as_bytes())
+            .await
+            .unwrap();
 
         // Keep server alive
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
 
     // Create client and connect
-    let mut client = create_client(
-        StratumVersion::V1,
-        host.clone(),
-        port,
-    ).await?;
+    let mut client = create_client(StratumVersion::V1, host.clone(), port, TestMiner).await?;
 
     // Subscribe
     let subscription = client.subscribe().await?;
@@ -168,7 +180,7 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
 #[tokio::test]
 async fn test_reconnection() -> Result<(), Box<dyn Error>> {
     let (listener, host, port) = setup_test_server(1.0).await;
-    
+
     // Spawn test server 1 and keep handle
     let server1 = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -176,10 +188,10 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
         let mut buf = String::new();
-        
+
         // Handle subscribe request
         reader.read_line(&mut buf).await.unwrap();
-        
+
         let subscribe_response = json!({
             "id": 1,
             "result": [
@@ -192,7 +204,10 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
             ],
             "error": null
         });
-        writer.write_all(format!("{}\n", subscribe_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", subscribe_response).as_bytes())
+            .await
+            .unwrap();
 
         // Handle authorize request
         buf.clear();
@@ -202,25 +217,47 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
             "result": true,
             "error": null
         });
-        writer.write_all(format!("{}\n", auth_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", auth_response).as_bytes())
+            .await
+            .unwrap();
+
+        // Send job notification
+        let job = json!({
+            "method": "mining.notify",
+            "params": [
+                "job1",
+                "00000000deadbeef00000000deadbeef00000000deadbeef00000000deadbeef",
+                "01000000",
+                "02000000",
+                ["1234567890abcdef"],
+                "00000001",
+                "1d00ffff",
+                "60509af9",
+                true
+            ]
+        });
+        writer
+            .write_all(format!("{}\n", job).as_bytes())
+            .await
+            .unwrap();
 
         // Send difficulty notification
         let difficulty_notify = json!({
             "method": "mining.set_difficulty",
             "params": [1.0]
         });
-        writer.write_all(format!("{}\n", difficulty_notify).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", difficulty_notify).as_bytes())
+            .await
+            .unwrap();
 
         // Keep server alive
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
     // Create and connect client
-    let mut client = create_client(
-        StratumVersion::V1,
-        host.clone(),
-        port,
-    ).await?;
+    let mut client = create_client(StratumVersion::V1, host.clone(), port, TestMiner).await?;
 
     // Initial connection works
     client.subscribe().await?;
@@ -256,10 +293,10 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
         let mut buf = String::new();
-        
+
         // Handle subscribe request
         reader.read_line(&mut buf).await.unwrap();
-        
+
         let subscribe_response = json!({
             "id": 3,
             "result": [
@@ -272,7 +309,10 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
             ],
             "error": null
         });
-        writer.write_all(format!("{}\n", subscribe_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", subscribe_response).as_bytes())
+            .await
+            .unwrap();
 
         // Handle authorize request
         buf.clear();
@@ -282,14 +322,40 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
             "result": true,
             "error": null
         });
-        writer.write_all(format!("{}\n", auth_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", auth_response).as_bytes())
+            .await
+            .unwrap();
+
+        // Send job notification
+        let job = json!({
+            "method": "mining.notify",
+            "params": [
+                "job1",
+                "00000000deadbeef00000000deadbeef00000000deadbeef00000000deadbeef",
+                "01000000",
+                "02000000",
+                ["1234567890abcdef"],
+                "00000001",
+                "1d00ffff",
+                "60509af9",
+                true
+            ]
+        });
+        writer
+            .write_all(format!("{}\n", job).as_bytes())
+            .await
+            .unwrap();
 
         // Send difficulty notification
         let difficulty_notify = json!({
             "method": "mining.set_difficulty",
             "params": [1.0]
         });
-        writer.write_all(format!("{}\n", difficulty_notify).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", difficulty_notify).as_bytes())
+            .await
+            .unwrap();
 
         // Keep server alive
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -300,11 +366,7 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
     let (_, _) = rx.await.unwrap();
 
     // Update client with new server info
-    client = create_client(
-        StratumVersion::V1,
-        new_host,
-        new_port,
-    ).await?;
+    client = create_client(StratumVersion::V1, new_host, new_port, TestMiner).await?;
 
     // Verify connection works
     client.subscribe().await?;
@@ -330,25 +392,18 @@ async fn test_reconnection() -> Result<(), Box<dyn Error>> {
 #[tokio::test]
 async fn test_error_handling() -> Result<(), Box<dyn Error>> {
     // Try connecting to invalid address
-    let result = create_client(
-        StratumVersion::V1,
-        "invalid".to_string(),
-        1234,
-    ).await;
+    let result = create_client(StratumVersion::V1, "invalid".to_string(), 1234, TestMiner).await;
     assert!(result.is_err());
 
     // Try connecting to non-existent server with minimal timeout
     use std::time::Duration;
     use tokio::time::timeout;
-    
+
     let result = timeout(
         Duration::from_millis(100),
-        create_client(
-            StratumVersion::V1,
-            "127.0.0.1".to_string(),
-            1234,
-        )
-    ).await;
+        create_client(StratumVersion::V1, "127.0.0.1".to_string(), 1234, TestMiner),
+    )
+    .await;
     assert!(result.is_err() || result.unwrap().is_err());
 
     // Connect to valid server
@@ -361,7 +416,7 @@ async fn test_error_handling() -> Result<(), Box<dyn Error>> {
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
         let mut buf = String::new();
-        
+
         // Handle subscribe request
         reader.read_line(&mut buf).await.unwrap();
         println!("Server received subscribe request: {}", buf);
@@ -371,18 +426,17 @@ async fn test_error_handling() -> Result<(), Box<dyn Error>> {
             "result": null,
             "error": ["Invalid request", -1, null]
         });
-        writer.write_all(format!("{}\n", error_response).as_bytes()).await.unwrap();
+        writer
+            .write_all(format!("{}\n", error_response).as_bytes())
+            .await
+            .unwrap();
 
         // Keep server alive
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
 
     // Try subscribing - should fail due to error response
-    let mut client = create_client(
-        StratumVersion::V1,
-        host,
-        port,
-    ).await?;
+    let mut client = create_client(StratumVersion::V1, host, port, TestMiner).await?;
 
     // Try subscribing - should fail due to error response
     // Add a small delay before subscribing

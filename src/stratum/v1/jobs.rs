@@ -1,13 +1,16 @@
+use crate::stratum::miner::Miner;
 use crate::stratum::{error::StratumError, types::*};
+use async_trait::async_trait;
+use hex;
+use rand::{thread_rng, Rng};
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
-use hex;
-use rand::{thread_rng, Rng};
 
 const MAX_JOB_HISTORY: usize = 10;
 const MAX_JOB_AGE: Duration = Duration::from_secs(600); // 10 minutes
@@ -41,13 +44,13 @@ impl JobState {
         }
 
         // Remove old jobs
-        self.job_history.retain(|_, history| {
-            history.received_at.elapsed() < MAX_JOB_AGE
-        });
+        self.job_history
+            .retain(|_, history| history.received_at.elapsed() < MAX_JOB_AGE);
 
         // Add new job to history
         if self.job_history.len() >= MAX_JOB_HISTORY {
-            if let Some(oldest) = self.job_history
+            if let Some(oldest) = self
+                .job_history
                 .iter()
                 .min_by_key(|(_, h)| h.received_at)
                 .map(|(k, _)| k.clone())
@@ -56,10 +59,13 @@ impl JobState {
             }
         }
 
-        self.job_history.insert(job.job_id.clone(), JobHistory {
-            job: job.clone(),
-            received_at: Instant::now(),
-        });
+        self.job_history.insert(
+            job.job_id.clone(),
+            JobHistory {
+                job: job.clone(),
+                received_at: Instant::now(),
+            },
+        );
 
         // Update current job
         self.current_job = Some(job);
@@ -72,14 +78,65 @@ impl JobState {
 
 /// Manages mining jobs and targets with validation and history tracking
 pub struct JobManager {
-    state: Arc<Mutex<JobState>>,
+    job_from_stratum_tx: tokio::sync::mpsc::UnboundedSender<MiningJob>,
+    is_alive: Arc<AtomicBool>,
+    result_receiver: tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>,
+    enqueued_job: Mutex<Option<MiningJob>>,
 }
 
 impl JobManager {
     /// Create a new job manager
-    pub fn new() -> Self {
+    pub fn new<M: Miner>(miner: M) -> Self {
+        let (job_from_stratum_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let is_alive = Arc::new(AtomicBool::new(true));
+        let is_alive_clone = is_alive.clone();
+
+        let background_worker = async move {
+            if !is_alive_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+
+            let mut current_running_task_canceller = None;
+
+            while let Some(job) = rx.recv().await {
+                if current_running_task_canceller.take().is_some() {
+                    log::warn!(target: "stratum", "Miner task cancelled because a newer job was received");
+                }
+
+                let miner = miner.clone();
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+                current_running_task_canceller = Some(stop_tx);
+
+                let result_tx = result_tx.clone();
+
+                let cancellable_task = tokio::spawn(async move {
+                    let miner_task = miner.on_job_received(job);
+
+                    tokio::select! {
+                        _ = stop_rx => {
+                            log::warn!(target: "stratum", "Miner task cancelled");
+                        }
+                        res = miner_task => {
+                            if let Err(err) = result_tx.send(res) {
+                                log::error!(target: "stratum", "Failed to send miner result: {err}");
+                            }
+                        }
+                    }
+                });
+
+                drop(cancellable_task);
+            }
+        };
+
+        tokio::spawn(background_worker);
+
         Self {
-            state: Arc::new(Mutex::new(JobState::new())),
+            job_from_stratum_tx,
+            is_alive,
+            result_receiver,
+            enqueued_job: None.into(),
         }
     }
 
@@ -97,56 +154,68 @@ impl JobManager {
             return Err(StratumError::InvalidJob("Incomplete job parameters".into()));
         }
 
-        let job_id = params[0].as_str()
+        let job_id = params[0]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid job_id".into()))?
             .to_string();
 
-        let prev_hash = params[1].as_str()
+        let prev_hash = params[1]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid prev_hash".into()))?;
         if prev_hash.len() != 64 {
-            return Err(StratumError::InvalidJob("prev_hash must be 32 bytes".into()));
+            return Err(StratumError::InvalidJob(
+                "prev_hash must be 32 bytes".into(),
+            ));
         }
 
-        let coinbase1 = params[2].as_str()
+        let coinbase1 = params[2]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid coinbase1".into()))?;
         if hex::decode(coinbase1).is_err() {
-            return Err(StratumError::InvalidJob("coinbase1 must be hex encoded".into()));
+            return Err(StratumError::InvalidJob(
+                "coinbase1 must be hex encoded".into(),
+            ));
         }
 
-        let coinbase2 = params[3].as_str()
+        let coinbase2 = params[3]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid coinbase2".into()))?;
         if hex::decode(coinbase2).is_err() {
-            return Err(StratumError::InvalidJob("coinbase2 must be hex encoded".into()));
+            return Err(StratumError::InvalidJob(
+                "coinbase2 must be hex encoded".into(),
+            ));
         }
 
-        let merkle_branch = params[4].as_array()
+        let merkle_branch = params[4]
+            .as_array()
             .ok_or_else(|| StratumError::InvalidJob("Invalid merkle_branch".into()))?
             .iter()
             .map(|v| v.as_str().map(String::from))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| StratumError::InvalidJob("Invalid merkle_branch format".into()))?;
 
-        let version = params[5].as_str()
+        let version = params[5]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid version".into()))?;
         if version.len() != 8 {
             return Err(StratumError::InvalidJob("version must be 4 bytes".into()));
         }
 
-        let nbits = params[6].as_str()
+        let nbits = params[6]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid nbits".into()))?;
         if nbits.len() != 8 {
             return Err(StratumError::InvalidJob("nbits must be 4 bytes".into()));
         }
 
-        let ntime = params[7].as_str()
+        let ntime = params[7]
+            .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid ntime".into()))?;
         if ntime.len() != 8 {
             return Err(StratumError::InvalidJob("ntime must be 4 bytes".into()));
         }
 
-        let clean_jobs = params.get(8)
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let clean_jobs = params.get(8).and_then(Value::as_bool).unwrap_or(false);
 
         Ok(MiningJob {
             job_id,
@@ -158,20 +227,21 @@ impl JobManager {
             nbits: nbits.to_string(),
             ntime: ntime.to_string(),
             clean_jobs,
+            target: None,
         })
     }
 
     /// Calculate target from difficulty
     fn calculate_target(difficulty: f64) -> [u8; 32] {
         let mut final_target = [0u8; 32];
-        
+
         // For difficulty 1, target is:
         // 0x00000000ffff0000000000000000000000000000000000000000000000000000
-        
+
         // Calculate mantissa with better precision
         let mantissa = (0xffff as f64 / difficulty) as u16;
-        final_target[2] = (mantissa >> 8) as u8;  // High byte
-        final_target[3] = mantissa as u8;         // Low byte
+        final_target[2] = (mantissa >> 8) as u8; // High byte
+        final_target[3] = mantissa as u8; // Low byte
 
         final_target
     }
@@ -179,64 +249,94 @@ impl JobManager {
     /// Handle a new job notification
     pub async fn handle_job_notification(&self, params: &[Value]) -> Result<(), StratumError> {
         let job = Self::validate_job(params)?;
-        let mut state = self.state.lock().await;
-        state.add_job(job);
+        *self.enqueued_job.lock().await = Some(job);
+
         Ok(())
     }
 
     /// Handle a new difficulty notification
-    pub async fn handle_difficulty_notification(&self, params: &[Value]) -> Result<(), StratumError> {
+    pub async fn handle_difficulty_notification(
+        &self,
+        params: &[Value],
+    ) -> Result<(), StratumError> {
         if params.is_empty() {
-            return Err(StratumError::Protocol("Empty mining.set_difficulty params".into()));
+            return Err(StratumError::Protocol(
+                "Empty mining.set_difficulty params".into(),
+            ));
         }
-        
-        let difficulty = params[0].as_f64()
+
+        let difficulty = params[0]
+            .as_f64()
             .ok_or_else(|| StratumError::Protocol("Invalid difficulty value".into()))?;
-        
+
         if difficulty <= 0.0 {
             return Err(StratumError::Protocol("Difficulty must be positive".into()));
         }
 
         let final_target = Self::calculate_target(difficulty);
-        let mut state = self.state.lock().await;
+        let mut lock = self.enqueued_job.lock().await;
+        let state = lock.as_mut().ok_or_else(|| {
+            StratumError::Protocol(
+                "Received a difficulty notification without having received a job first".into(),
+            )
+        })?;
         state.target = Some(MiningTarget {
             difficulty,
             target: hex::encode(&final_target),
         });
 
+        // Now that we have received the difficulty, we can send the job to the background processor
+        self.job_from_stratum_tx
+            .send(state.clone())
+            .map_err(|err| {
+                StratumError::Io(format!(
+                    "Failed to send job to job_from_stratum channel - {err}"
+                ))
+            })?;
+
         Ok(())
+    }
+
+    async fn get_job_or_error(&self) -> Result<MiningJob, StratumError> {
+        self.enqueued_job
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| StratumError::Protocol("No job available".into()))
     }
 
     /// Get the current mining job if available
     pub async fn get_current_job(&self) -> Result<Option<MiningJob>, StratumError> {
-        Ok(self.state.lock().await.current_job.clone())
+        Ok(self.enqueued_job.lock().await.clone())
     }
 
     /// Get the current target if available
     pub async fn get_target(&self) -> Result<MiningTarget, StratumError> {
-        self.state.lock().await.target.clone()
-            .ok_or_else(|| StratumError::Protocol("No target available".into()))
+        self.get_job_or_error()
+            .await?
+            .target
+            .clone()
+            .ok_or_else(|| StratumError::Protocol("No target set".into()))
     }
 
     /// Validate a share submission
     pub async fn validate_share(&self, share: &Share) -> Result<bool, StratumError> {
-        let state = self.state.lock().await;
-        
-        // Get job from history
-        let job = state.get_job(&share.job_id)
-            .ok_or_else(|| StratumError::InvalidJob("Unknown job ID".into()))?;
+        let job = self.get_job_or_error().await?;
 
         // Validate nonce format
         if share.nonce.len() != 8 {
             return Err(StratumError::InvalidJob("Invalid nonce format".into()));
         }
+
         if hex::decode(&share.nonce).is_err() {
             return Err(StratumError::InvalidJob("Nonce must be hex encoded".into()));
         }
 
         // Validate extranonce2 format
         if hex::decode(&share.extranonce2).is_err() {
-            return Err(StratumError::InvalidJob("Extranonce2 must be hex encoded".into()));
+            return Err(StratumError::InvalidJob(
+                "Extranonce2 must be hex encoded".into(),
+            ));
         }
 
         // Validate ntime
@@ -248,9 +348,21 @@ impl JobManager {
         // 1. Reconstruct the block header
         // 2. Hash it
         // 3. Compare against target
-        
+
         // For now, just validate formats
         Ok(true)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct TestMiner;
+
+#[async_trait]
+impl Miner for TestMiner {
+    async fn on_job_received(&self, job: MiningJob) -> Result<u32, StratumError> {
+        log::info!(target: "stratum", "Received job: {job:?}");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        Ok(0)
     }
 }
 
@@ -261,23 +373,23 @@ mod tests {
 
     fn create_valid_job_params() -> Vec<Value> {
         vec![
-            json!("job123"),                      // job_id
+            json!("job123"),                                                           // job_id
             json!("00000000000000000000000000000000000000000000000000000000deadbeef"), // prev_hash
-            json!("01000000"),                    // coinbase1
-            json!("02000000"),                    // coinbase2
-            json!(["1234567890abcdef"]),          // merkle_branch
-            json!("00000001"),                    // version
-            json!("1d00ffff"),                    // nbits
-            json!("60509af9"),                    // ntime
-            json!(true),                          // clean_jobs
+            json!("01000000"),                                                         // coinbase1
+            json!("02000000"),                                                         // coinbase2
+            json!(["1234567890abcdef"]), // merkle_branch
+            json!("00000001"),           // version
+            json!("1d00ffff"),           // nbits
+            json!("60509af9"),           // ntime
+            json!(true),                 // clean_jobs
         ]
     }
 
     #[tokio::test]
     async fn test_job_validation() {
-        let manager = JobManager::new();
+        let manager = JobManager::new(TestMiner);
         let params = create_valid_job_params();
-        
+
         // Test valid job
         assert!(manager.handle_job_notification(&params).await.is_ok());
 
@@ -298,22 +410,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_difficulty_handling() {
-        let manager = JobManager::new();
-        
+        let manager = JobManager::new(TestMiner);
+
+        let params = create_valid_job_params();
+        // Test valid job
+        assert!(manager.handle_job_notification(&params).await.is_ok());
+
         // Test valid difficulty
-        assert!(manager.handle_difficulty_notification(&[json!(2.0)]).await.is_ok());
-        
+        assert!(manager
+            .handle_difficulty_notification(&[json!(2.0)])
+            .await
+            .is_ok());
+
         // Test invalid difficulty
-        assert!(manager.handle_difficulty_notification(&[json!(-1.0)]).await.is_err());
-        assert!(manager.handle_difficulty_notification(&[json!(0.0)]).await.is_err());
-        assert!(manager.handle_difficulty_notification(&[json!("invalid")]).await.is_err());
+        assert!(manager
+            .handle_difficulty_notification(&[json!(-1.0)])
+            .await
+            .is_err());
+        assert!(manager
+            .handle_difficulty_notification(&[json!(0.0)])
+            .await
+            .is_err());
+        assert!(manager
+            .handle_difficulty_notification(&[json!("invalid")])
+            .await
+            .is_err());
         assert!(manager.handle_difficulty_notification(&[]).await.is_err());
 
         // Verify target calculation
-        manager.handle_difficulty_notification(&[json!(2.0)]).await.unwrap();
+        manager
+            .handle_difficulty_notification(&[json!(2.0)])
+            .await
+            .unwrap();
         let target = manager.get_target().await.unwrap();
         assert_eq!(target.difficulty, 2.0);
-        
+
         // Target should be half of max target
         let _max_target = [0u8; 32];
         let actual_target = hex::decode(target.target).unwrap();
@@ -321,35 +452,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_job_history() {
-        let manager = JobManager::new();
-        let mut params = create_valid_job_params();
-
-        // Add multiple jobs
-        for i in 0..15 {
-            params[0] = json!(format!("job{}", i));
-            manager.handle_job_notification(&params).await.unwrap();
-        }
-
-        // Verify we can only get recent jobs
-        let state = manager.state.lock().await;
-        assert!(state.job_history.len() <= MAX_JOB_HISTORY);
-        
-        // Verify clean_jobs behavior
-        params[0] = json!("new_job");
-        params[8] = json!(true); // clean_jobs = true
-        drop(state);
-        
-        manager.handle_job_notification(&params).await.unwrap();
-        let state = manager.state.lock().await;
-        assert_eq!(state.job_history.len(), 1);
-        assert!(state.get_job("new_job").is_some());
-    }
-
-    #[tokio::test]
     async fn test_share_validation() {
-        let manager = JobManager::new();
-        
+        let manager = JobManager::new(TestMiner);
+
         // Add a job
         let params = create_valid_job_params();
         manager.handle_job_notification(&params).await.unwrap();
@@ -362,13 +467,6 @@ mod tests {
             nonce: "00000000".to_string(),
         };
         assert!(manager.validate_share(&share).await.unwrap());
-
-        // Test unknown job
-        let invalid = Share {
-            job_id: "unknown".to_string(),
-            ..share.clone()
-        };
-        assert!(manager.validate_share(&invalid).await.is_err());
 
         // Test invalid nonce
         let invalid = Share {
