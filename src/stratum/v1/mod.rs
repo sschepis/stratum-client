@@ -140,9 +140,16 @@ impl StratumClient for StratumV1Client {
 
         let extranonce1 = subscription[1].as_str().unwrap_or_default().to_string();
 
+        let extranonce2_size = match &subscription[2] {
+            Value::Number(n) => n.as_u64().unwrap_or(0) as usize,
+            Value::Null => 0,
+            _ => subscription[2].as_u64().unwrap_or(0) as usize,
+        };
+
         Ok(SubscribeResponse {
             subscription_id,
             extranonce1,
+            extranonce2_size,
         })
     }
 
@@ -292,6 +299,7 @@ mod tests {
                         ["mining.notify", "1"]
                     ],
                     "extranonce1",
+                    10,
                 ],
                 "error": null
             });
@@ -307,6 +315,7 @@ mod tests {
 
         assert_eq!(response.subscription_id, "1");
         assert_eq!(response.extranonce1, "extranonce1");
+        assert_eq!(response.extranonce2_size, 10);
     }
 
     #[tokio::test]

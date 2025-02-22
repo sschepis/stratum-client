@@ -11,8 +11,7 @@ pub struct MiningJob {
     pub version: String,
     pub nbits: String,
     pub ntime: String,
-    pub clean_jobs: bool,
-    pub extranonce2: String,
+    pub clean_jobs: Option<bool>,
     pub target: Option<MiningTarget>,
 }
 
@@ -20,6 +19,7 @@ pub struct MiningJob {
 pub struct SubscribeResponse {
     pub subscription_id: String,
     pub extranonce1: String,
+    pub extranonce2_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

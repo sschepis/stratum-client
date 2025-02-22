@@ -12,70 +12,6 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-const MAX_JOB_HISTORY: usize = 10;
-const MAX_JOB_AGE: Duration = Duration::from_secs(600); // 10 minutes
-
-#[derive(Debug, Clone)]
-struct JobHistory {
-    job: MiningJob,
-    received_at: Instant,
-}
-
-#[derive(Debug)]
-struct JobState {
-    current_job: Option<MiningJob>,
-    job_history: HashMap<String, JobHistory>,
-    target: Option<MiningTarget>,
-}
-
-impl JobState {
-    fn new() -> Self {
-        Self {
-            current_job: None,
-            job_history: HashMap::with_capacity(MAX_JOB_HISTORY),
-            target: None,
-        }
-    }
-
-    fn add_job(&mut self, job: MiningJob) {
-        // Add to history before updating current
-        if job.clean_jobs {
-            self.job_history.clear();
-        }
-
-        // Remove old jobs
-        self.job_history
-            .retain(|_, history| history.received_at.elapsed() < MAX_JOB_AGE);
-
-        // Add new job to history
-        if self.job_history.len() >= MAX_JOB_HISTORY {
-            if let Some(oldest) = self
-                .job_history
-                .iter()
-                .min_by_key(|(_, h)| h.received_at)
-                .map(|(k, _)| k.clone())
-            {
-                self.job_history.remove(&oldest);
-            }
-        }
-
-        self.job_history.insert(
-            job.job_id.clone(),
-            JobHistory {
-                job: job.clone(),
-                received_at: Instant::now(),
-            },
-        );
-
-        // Update current job
-        self.current_job = Some(job);
-    }
-
-    fn get_job(&self, job_id: &str) -> Option<&MiningJob> {
-        self.job_history.get(job_id).map(|h| &h.job)
-    }
-}
-
 /// Manages mining jobs and targets with validation and history tracking
 #[derive(Clone)]
 pub struct JobManager {
@@ -173,7 +109,7 @@ impl JobManager {
     }
 
     /// Validate a mining job notification
-    fn validate_job(params: &[Value]) -> Result<MiningJob, StratumError> {
+    fn parse_job(params: &[Value]) -> Result<MiningJob, StratumError> {
         if params.len() < 8 {
             return Err(StratumError::InvalidJob("Incomplete job parameters".into()));
         }
@@ -186,6 +122,7 @@ impl JobManager {
         let prev_hash = params[1]
             .as_str()
             .ok_or_else(|| StratumError::InvalidJob("Invalid prev_hash".into()))?;
+
         if prev_hash.len() != 64 {
             return Err(StratumError::InvalidJob(
                 "prev_hash must be 32 bytes".into(),
@@ -239,7 +176,7 @@ impl JobManager {
             return Err(StratumError::InvalidJob("ntime must be 4 bytes".into()));
         }
 
-        let clean_jobs = params.get(8).and_then(Value::as_bool).unwrap_or(false);
+        let clean_jobs = params.get(8).and_then(Value::as_bool);
 
         Ok(MiningJob {
             job_id,
@@ -251,7 +188,6 @@ impl JobManager {
             nbits: nbits.to_string(),
             ntime: ntime.to_string(),
             clean_jobs,
-            extranonce2: Default::default(),// TODOL UPDATE!!!
             target: None,
         })
     }
@@ -306,7 +242,7 @@ impl JobManager {
     /// Handle a new job notification
     /// Step 2: Receive job, expect a difficulty notification
     pub async fn handle_job_notification(&self, params: &[Value]) -> Result<(), StratumError> {
-        let job = Self::validate_job(params)?;
+        let job = Self::parse_job(params)?;
         let mut lock = self.enqueued_job.lock().await;
         *lock = Some(job.clone());
         drop(lock);
@@ -328,7 +264,9 @@ impl JobManager {
                     job.job_id != *currently_running_job_id.clone().unwrap_or_default();
                 let merkle_root_changed =
                     job.merkle_branch != currently_running_merkle_root.clone().unwrap_or_default();
-                let needs_to_run = job_ids_changed || merkle_root_changed;
+                let needs_update = job.clean_jobs.is_some();
+
+                let needs_to_run = job_ids_changed || merkle_root_changed || needs_update;
 
                 if needs_to_run {
                     job.target = Some(difficulty);
