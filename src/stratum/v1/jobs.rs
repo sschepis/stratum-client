@@ -81,8 +81,9 @@ impl JobState {
 pub struct JobManager {
     job_from_stratum_tx: tokio::sync::mpsc::UnboundedSender<MiningJob>,
     is_alive: Arc<AtomicBool>,
-    pub result_receiver:
-        Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>>>>,
+    pub result_receiver: Arc<
+        Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Result<(u32, MiningJob), StratumError>>>>,
+    >,
     enqueued_job: Arc<Mutex<Option<MiningJob>>>,
     enqueued_difficulty: Arc<Mutex<Option<MiningTarget>>>,
     currently_running_job_id: Arc<Mutex<Option<String>>>,
@@ -413,10 +414,10 @@ pub struct TestMiner;
 
 #[async_trait]
 impl Miner for TestMiner {
-    async fn on_job_received(&self, job: MiningJob) -> Result<u32, StratumError> {
+    async fn on_job_received(&self, job: MiningJob) -> Result<(u32, MiningJob), StratumError> {
         log::info!(target: "stratum", "Received job: {job:?}");
         tokio::time::sleep(Duration::from_millis(1000)).await;
-        Ok(0)
+        Ok((0, job))
     }
 }
 

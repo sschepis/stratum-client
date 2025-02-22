@@ -42,7 +42,7 @@ impl StratumV1Client {
 
     pub async fn take_result_receiver(
         &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>> {
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Result<(u32, MiningJob), StratumError>>> {
         self.job_manager.result_receiver.lock().await.take()
     }
 
