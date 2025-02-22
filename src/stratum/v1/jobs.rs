@@ -84,13 +84,21 @@ pub struct JobManager {
     pub result_receiver:
         Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>>>>,
     enqueued_job: Arc<Mutex<Option<MiningJob>>>,
+    enqueued_difficulty: Arc<Mutex<Option<MiningTarget>>>,
+    currently_running_job_id: Arc<Mutex<Option<String>>>,
+    currently_running_merkle_root: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 impl JobManager {
     /// Create a new job manager
     pub fn new<M: Miner>(miner: M) -> Self {
-        let (job_from_stratum_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (job_from_stratum_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MiningJob>();
         let (result_tx, result_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let currently_running_job_id = Arc::new(Mutex::new(None));
+        let currently_running_job_id_clone = currently_running_job_id.clone();
+        let currently_running_merkle_root = Arc::new(Mutex::new(None));
+        let currently_running_merkle_root_clone = currently_running_merkle_root.clone();
 
         let is_alive = Arc::new(AtomicBool::new(true));
         let is_alive_clone = is_alive.clone();
@@ -107,11 +115,18 @@ impl JobManager {
                     log::warn!(target: "stratum", "Miner task cancelled because a newer job was received");
                 }
 
+                *currently_running_job_id_clone.lock().await = Some(job.job_id.clone());
+                *currently_running_merkle_root_clone.lock().await = Some(job.merkle_branch.clone());
+
                 let miner = miner.clone();
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
                 current_running_task_canceller = Some(stop_tx);
 
                 let result_tx = result_tx.clone();
+
+                let currently_running_job_id_clone = currently_running_job_id_clone.clone();
+                let currently_running_merkle_root_clone =
+                    currently_running_merkle_root_clone.clone();
 
                 let cancellable_task = tokio::spawn(async move {
                     let miner_task = miner.on_job_received(job);
@@ -126,6 +141,9 @@ impl JobManager {
                             }
                         }
                     }
+
+                    let _ = currently_running_job_id_clone.lock().await.take();
+                    let _ = currently_running_merkle_root_clone.lock().await.take();
                 });
 
                 drop(cancellable_task);
@@ -139,6 +157,9 @@ impl JobManager {
             is_alive,
             result_receiver: Arc::new(Mutex::new(Some(result_receiver))),
             enqueued_job: Arc::new(Mutex::new(None)),
+            enqueued_difficulty: Arc::new(Mutex::new(None)),
+            currently_running_job_id,
+            currently_running_merkle_root,
         }
     }
 
@@ -248,15 +269,8 @@ impl JobManager {
         final_target
     }
 
-    /// Handle a new job notification
-    pub async fn handle_job_notification(&self, params: &[Value]) -> Result<(), StratumError> {
-        let job = Self::validate_job(params)?;
-        *self.enqueued_job.lock().await = Some(job);
-
-        Ok(())
-    }
-
     /// Handle a new difficulty notification
+    /// Step 1: Receive difficulty notification
     pub async fn handle_difficulty_notification(
         &self,
         params: &[Value],
@@ -276,25 +290,63 @@ impl JobManager {
         }
 
         let final_target = Self::calculate_target(difficulty);
-        let mut lock = self.enqueued_job.lock().await;
-        let state = lock.as_mut().ok_or_else(|| {
-            StratumError::Protocol(
-                "Received a difficulty notification without having received a job first".into(),
-            )
-        })?;
-        state.target = Some(MiningTarget {
+        let mut lock = self.enqueued_difficulty.lock().await;
+        *lock = Some(MiningTarget {
             difficulty,
             target: hex::encode(&final_target),
         });
 
+        drop(lock);
+
+        self.maybe_run_job().await
+    }
+
+    /// Handle a new job notification
+    /// Step 2: Receive job, expect a difficulty notification
+    pub async fn handle_job_notification(&self, params: &[Value]) -> Result<(), StratumError> {
+        let job = Self::validate_job(params)?;
+        let mut lock = self.enqueued_job.lock().await;
+        *lock = Some(job.clone());
+        drop(lock);
+
         // Now that we have received the difficulty, we can send the job to the background processor
-        self.job_from_stratum_tx
-            .send(state.clone())
-            .map_err(|err| {
-                StratumError::Io(format!(
-                    "Failed to send job to job_from_stratum channel - {err}"
-                ))
-            })?;
+        self.maybe_run_job().await
+    }
+
+    pub async fn maybe_run_job(&self) -> Result<(), StratumError> {
+        // TODO: Refactor all this into a single Mutex wrapper
+        let mut enqueued_job = self.enqueued_job.lock().await;
+        let enqueued_difficulty = self.enqueued_difficulty.lock().await;
+        let currently_running_job_id = self.currently_running_job_id.lock().await;
+        let currently_running_merkle_root = self.currently_running_merkle_root.lock().await;
+
+        match (enqueued_job.clone(), enqueued_difficulty.clone()) {
+            (Some(mut job), Some(difficulty)) => {
+                let job_ids_changed =
+                    job.job_id != *currently_running_job_id.clone().unwrap_or_default();
+                let merkle_root_changed =
+                    job.merkle_branch != currently_running_merkle_root.clone().unwrap_or_default();
+                let needs_to_run = job_ids_changed || merkle_root_changed;
+
+                if needs_to_run {
+                    job.target = Some(difficulty);
+                    *enqueued_job = Some(job.clone());
+                    log::info!(target: "stratum", "Execution criteria met. Running job: {job:?}");
+
+                    self.job_from_stratum_tx.send(job).map_err(|err| {
+                        StratumError::Io(format!(
+                            "Failed to send job to job_from_stratum channel - {err}"
+                        ))
+                    })?;
+                } else {
+                    log::warn!(target: "stratum", "Job does not meet the criteria to run: job_ids_changed: {job_ids_changed}, merkle_root_changed: {merkle_root_changed}");
+                }
+            }
+
+            _ => {
+                log::warn!(target: "stratum", "Still waiting for both job and difficulty to be set ...");
+            }
+        }
 
         Ok(())
     }
