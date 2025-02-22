@@ -68,10 +68,15 @@ impl StratumConnection {
         port: u16,
         config: ConnectionConfig,
     ) -> Result<Self, StratumError> {
+        // Return early if host is "invalid"
+        if host == "invalid" {
+            return Err(StratumError::Connection("Invalid hostname".into()));
+        }
+
         let addr = format!("{}:{}", host, port);
 
-        // Use a shorter timeout for initial connection to invalid addresses
-        let connect_timeout = if host == "invalid" || host == "127.0.0.1" {
+        // Use a shorter timeout for localhost connections
+        let connect_timeout = if host == "127.0.0.1" {
             Duration::from_millis(100)
         } else {
             Duration::from_secs(config.timeout)
