@@ -136,6 +136,8 @@ impl StratumClient for StratumV1Client {
             })?
             .to_string();
 
+        log::info!("Subscription data: {subscription:?}");
+
         let extranonce1 = subscription[1].as_str().unwrap_or_default().to_string();
         let extranonce2 = subscription[2].as_str().unwrap_or_default().to_string();
 
