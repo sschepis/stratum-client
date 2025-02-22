@@ -298,46 +298,48 @@ impl StratumConnection {
         let mut reader = reader_lock;
         let mut line = String::new();
 
-        match timeout(
-            Duration::from_secs(self.config.timeout),
-            reader.read_line(&mut line),
-        )
-        .await
-        {
-            Ok(Ok(0)) => Ok(json!(null)), // No data available
-            Ok(Ok(_)) => {
-                match serde_json::from_str(&line.trim()) {
-                    Ok(value) => {
-                        // Update stats
-                        let mut stats = self.stats.lock().await;
-                        stats.messages_received += 1;
-                        stats.last_message_at = Some(Instant::now());
-                        Ok(value)
-                    }
-                    Err(e) => {
-                        if line.trim().is_empty() {
-                            Ok(json!(null))
-                        } else {
-                            let err =
-                                StratumError::Protocol(format!("Invalid JSON notification: {}", e));
+        loop {
+            match timeout(
+                Duration::from_secs(self.config.timeout),
+                reader.read_line(&mut line),
+            )
+            .await
+            {
+                Ok(Ok(0)) => return Ok(json!(null)), // No data available
+                Ok(Ok(_)) => {
+                    return match serde_json::from_str(&line.trim()) {
+                        Ok(value) => {
+                            // Update stats
                             let mut stats = self.stats.lock().await;
-                            stats.errors += 1;
-                            Err(err)
+                            stats.messages_received += 1;
+                            stats.last_message_at = Some(Instant::now());
+                            Ok(value)
                         }
-                    }
+                        Err(e) => {
+                            if line.trim().is_empty() {
+                                Ok(json!(null))
+                            } else {
+                                let err = StratumError::Protocol(format!(
+                                    "Invalid JSON notification: {}",
+                                    e
+                                ));
+                                let mut stats = self.stats.lock().await;
+                                stats.errors += 1;
+                                Err(err)
+                            }
+                        }
+                    };
                 }
-            }
-            Ok(Err(e)) => {
-                let err = StratumError::Protocol(format!("Read error in notifications: {}", e));
-                let mut stats = self.stats.lock().await;
-                stats.errors += 1;
-                Err(err)
-            }
-            Err(e) => {
-                let err = StratumError::Protocol(format!("Read timeout in notifications: {}", e));
-                let mut stats = self.stats.lock().await;
-                stats.errors += 1;
-                Err(err)
+                Ok(Err(e)) => {
+                    let err = StratumError::Protocol(format!("Read error in notifications: {}", e));
+                    let mut stats = self.stats.lock().await;
+                    stats.errors += 1;
+                    return Err(err);
+                }
+                Err(e) => {
+                    log::warn!(target: "stratum", "Read timeout in notifications, retrying ...: {e}");
+                    continue;
+                }
             }
         }
     }

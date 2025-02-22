@@ -29,7 +29,7 @@ pub const MINING_SET_DIFFICULTY: &str = "mining.set_difficulty";
 pub const CLIENT_VERSION: &str = "rust-stratum-client/1.0.0";
 
 /// Default timeout for network operations in seconds
-pub const DEFAULT_TIMEOUT: u64 = 5;
+pub const DEFAULT_TIMEOUT: u64 = 20;
 
 /// Maximum number of retries for failed operations
 pub const MAX_RETRIES: u32 = 3;

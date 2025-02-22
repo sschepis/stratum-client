@@ -19,7 +19,7 @@ pub struct MiningJob {
 pub struct SubscribeResponse {
     pub subscription_id: String,
     pub extranonce1: String,
-    pub extranonce2_size: usize,
+    pub extranonce2: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

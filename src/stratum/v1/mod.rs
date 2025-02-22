@@ -135,17 +135,14 @@ impl StratumClient for StratumV1Client {
                 StratumError::SubscriptionFailed("Invalid subscription ID format".into())
             })?
             .to_string();
-        let extranonce1 = subscription[1].as_str().unwrap_or("").to_string();
-        let extranonce2_size = match &subscription[2] {
-            Value::Number(n) => n.as_u64().unwrap_or(0) as usize,
-            Value::Null => 0,
-            _ => subscription[2].as_u64().unwrap_or(0) as usize,
-        };
+
+        let extranonce1 = subscription[1].as_str().unwrap_or_default().to_string();
+        let extranonce2 = subscription[2].as_str().unwrap_or_default().to_string();
 
         Ok(SubscribeResponse {
             subscription_id,
             extranonce1,
-            extranonce2_size,
+            extranonce2,
         })
     }
 
@@ -295,7 +292,7 @@ mod tests {
                         ["mining.notify", "1"]
                     ],
                     "extranonce1",
-                    4
+                    "extranonce2"
                 ],
                 "error": null
             });
@@ -311,7 +308,7 @@ mod tests {
 
         assert_eq!(response.subscription_id, "1");
         assert_eq!(response.extranonce1, "extranonce1");
-        assert_eq!(response.extranonce2_size, 4);
+        assert_eq!(response.extranonce2, "extranonce2");
     }
 
     #[tokio::test]
