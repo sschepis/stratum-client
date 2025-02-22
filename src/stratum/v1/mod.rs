@@ -39,7 +39,7 @@ impl StratumV1Client {
         })
     }
 
-    pub fn take_job_receiver(
+    pub fn take_result_receiver(
         &mut self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>> {
         self.job_manager.result_receiver.take()
