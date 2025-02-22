@@ -121,7 +121,6 @@ async fn test_full_mining_cycle() -> Result<(), Box<dyn Error>> {
     let subscription = client.subscribe().await?;
     assert!(!subscription.subscription_id.is_empty());
     assert!(!subscription.extranonce1.is_empty());
-    assert!(!subscription.extranonce2.is_empty());
 
     // Authorize
     let auth = client.authorize("test.worker1", "x").await?;

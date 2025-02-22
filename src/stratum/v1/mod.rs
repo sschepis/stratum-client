@@ -103,7 +103,7 @@ impl StratumClient for StratumV1Client {
             StratumError::SubscriptionFailed("Invalid subscription format".into())
         })?;
 
-        if subscription.len() < 3 {
+        if subscription.len() < 2 {
             return Err(StratumError::SubscriptionFailed(
                 "Incomplete subscription data".into(),
             ));
@@ -139,12 +139,10 @@ impl StratumClient for StratumV1Client {
         log::info!("Subscription data: {subscription:?}");
 
         let extranonce1 = subscription[1].as_str().unwrap_or_default().to_string();
-        let extranonce2 = subscription[2].as_str().unwrap_or_default().to_string();
 
         Ok(SubscribeResponse {
             subscription_id,
             extranonce1,
-            extranonce2,
         })
     }
 
@@ -217,7 +215,7 @@ impl StratumClient for StratumV1Client {
     /// It processes one notification at a time, so call it in a loop during mining.
     async fn handle_notifications(&mut self) -> Result<(), StratumError> {
         let notification = self.connection.lock().await.read_notification().await?;
-
+        log::info!(target: "stratum", "Received raw notification: {notification:?}");
         if let Some(method) = notification.get("method").and_then(Value::as_str) {
             match method {
                 MINING_NOTIFY => {
@@ -294,7 +292,6 @@ mod tests {
                         ["mining.notify", "1"]
                     ],
                     "extranonce1",
-                    "extranonce2"
                 ],
                 "error": null
             });
@@ -310,7 +307,6 @@ mod tests {
 
         assert_eq!(response.subscription_id, "1");
         assert_eq!(response.extranonce1, "extranonce1");
-        assert_eq!(response.extranonce2, "extranonce2");
     }
 
     #[tokio::test]

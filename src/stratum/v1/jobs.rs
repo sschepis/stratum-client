@@ -251,6 +251,7 @@ impl JobManager {
             nbits: nbits.to_string(),
             ntime: ntime.to_string(),
             clean_jobs,
+            extranonce2: Default::default(),// TODOL UPDATE!!!
             target: None,
         })
     }

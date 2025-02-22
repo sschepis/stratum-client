@@ -26,7 +26,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Connected to pool!");
     println!("Subscription ID: {}", subscription.subscription_id);
     println!("Extranonce1: {}", subscription.extranonce1);
-    println!("Extranonce2: {}", subscription.extranonce2);
 
     // Authorize with pool credentials
     let auth = client.authorize(&username, &password).await?;
