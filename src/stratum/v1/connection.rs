@@ -225,8 +225,8 @@ impl StratumConnection {
                             return Ok(response);
                         }
                         Err(e) => {
-                            println!("Error parsing response: {}", e);
-                            println!("Raw response line: {}", line);
+                            eprintln!("Error parsing response: {}", e);
+                            eprintln!("Raw response line: {}", line);
                             let err =
                                 StratumError::Protocol(format!("Invalid JSON response: {}", e));
                             last_error = Some(err.clone());

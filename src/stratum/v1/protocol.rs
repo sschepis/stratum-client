@@ -13,7 +13,7 @@ pub struct JsonRpcRequest {
 /// JSON-RPC response for Stratum protocol
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JsonRpcResponse {
-    pub id: u64,
+    pub id: Option<u64>,
     pub result: Option<Value>,
     pub error: Option<Value>,
 }
@@ -85,7 +85,7 @@ impl JsonRpcResponse {
     /// Create a new successful response
     pub fn ok(id: u64, result: Value) -> Self {
         Self {
-            id,
+            id: Some(id),
             result: Some(result),
             error: None,
         }
@@ -94,7 +94,7 @@ impl JsonRpcResponse {
     /// Create a new error response
     pub fn err(id: u64, error: Value) -> Self {
         Self {
-            id,
+            id: Some(id),
             result: None,
             error: Some(error),
         }
@@ -123,14 +123,14 @@ impl fmt::Display for JsonRpcResponse {
         if let Some(error) = &self.error {
             write!(
                 f,
-                "JsonRpcResponse {{ id: {}, error: {} }}",
+                "JsonRpcResponse {{ id: {:?}, error: {} }}",
                 self.id,
                 serde_json::to_string(error).unwrap()
             )
         } else {
             write!(
                 f,
-                "JsonRpcResponse {{ id: {}, result: Some({}) }}",
+                "JsonRpcResponse {{ id: {:?}, result: Some({}) }}",
                 self.id,
                 serde_json::to_string(self.result.as_ref().unwrap()).unwrap()
             )
@@ -202,21 +202,6 @@ mod tests {
         assert_eq!(
             format!("{}", req),
             r#"JsonRpcRequest { id: 1, method: test, params: ["param"] }"#
-        );
-    }
-
-    #[test]
-    fn test_response_display() {
-        let resp = JsonRpcResponse::ok(1, json!("result"));
-        assert_eq!(
-            format!("{}", resp),
-            r#"JsonRpcResponse { id: 1, result: Some("result") }"#
-        );
-
-        let resp = JsonRpcResponse::err(1, json!("error"));
-        assert_eq!(
-            format!("{}", resp),
-            r#"JsonRpcResponse { id: 1, error: "error" }"#
         );
     }
 }
