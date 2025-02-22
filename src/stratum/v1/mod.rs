@@ -39,6 +39,12 @@ impl StratumV1Client {
         })
     }
 
+    pub fn take_job_receiver(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>> {
+        self.job_manager.result_receiver.take()
+    }
+
     /// Convenience method to connect and authenticate with a mining pool in one call
     pub async fn connect_and_auth<M: Miner>(
         host: String,

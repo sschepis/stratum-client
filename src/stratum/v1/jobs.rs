@@ -80,7 +80,7 @@ impl JobState {
 pub struct JobManager {
     job_from_stratum_tx: tokio::sync::mpsc::UnboundedSender<MiningJob>,
     is_alive: Arc<AtomicBool>,
-    result_receiver: tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>,
+    pub result_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>>,
     enqueued_job: Mutex<Option<MiningJob>>,
 }
 
@@ -135,7 +135,7 @@ impl JobManager {
         Self {
             job_from_stratum_tx,
             is_alive,
-            result_receiver,
+            result_receiver: Some(result_receiver),
             enqueued_job: None.into(),
         }
     }
