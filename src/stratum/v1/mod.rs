@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 /// - Subscription and authorization
 /// - Job notifications and difficulty updates
 /// - Share submission
+#[derive(Clone)]
 pub struct StratumV1Client {
     connection: Arc<Mutex<StratumConnection>>,
     job_manager: JobManager,
@@ -39,10 +40,10 @@ impl StratumV1Client {
         })
     }
 
-    pub fn take_result_receiver(
-        &mut self,
+    pub async fn take_result_receiver(
+        &self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>> {
-        self.job_manager.result_receiver.take()
+        self.job_manager.result_receiver.lock().await.take()
     }
 
     /// Convenience method to connect and authenticate with a mining pool in one call

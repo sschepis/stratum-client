@@ -77,11 +77,13 @@ impl JobState {
 }
 
 /// Manages mining jobs and targets with validation and history tracking
+#[derive(Clone)]
 pub struct JobManager {
     job_from_stratum_tx: tokio::sync::mpsc::UnboundedSender<MiningJob>,
     is_alive: Arc<AtomicBool>,
-    pub result_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>>,
-    enqueued_job: Mutex<Option<MiningJob>>,
+    pub result_receiver:
+        Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Result<u32, StratumError>>>>>,
+    enqueued_job: Arc<Mutex<Option<MiningJob>>>,
 }
 
 impl JobManager {
@@ -135,8 +137,8 @@ impl JobManager {
         Self {
             job_from_stratum_tx,
             is_alive,
-            result_receiver: Some(result_receiver),
-            enqueued_job: None.into(),
+            result_receiver: Arc::new(Mutex::new(Some(result_receiver))),
+            enqueued_job: Arc::new(Mutex::new(None)),
         }
     }
 
