@@ -169,6 +169,7 @@ impl StratumClient for StratumV1Client {
             .send_request(MINING_AUTHORIZE, vec![json!(username), json!(password)])
             .await?;
 
+        log::info!(target: "stratum", "Authorization response: {response:?}");
         let authorized = response
             .result
             .unwrap_or(json!(false))
