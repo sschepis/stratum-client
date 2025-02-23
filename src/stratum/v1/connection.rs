@@ -204,6 +204,7 @@ impl StratumConnection {
                     continue;
                 }
                 Ok(Ok(_)) => {
+                    log::info!(target: "stratum", "[Raw] Client received response: {}", line.trim());
                     match serde_json::from_str(&line) {
                         Ok(response) => {
                             let response: JsonRpcResponse = response;
