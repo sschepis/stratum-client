@@ -81,9 +81,9 @@ impl StratumV1Client {
 
                     // Start mining if we have a new job or difficulty changed
                     let should_mine = job.job_id != current_job_id || client_clone.job_manager.should_restart_mining().await;
-                    log::info!("Starting mining with difficulty {} and job ID: {}", target.difficulty, job.job_id);
 
                     if should_mine {
+                        log::info!("Starting mining with difficulty {} and job ID: {}", target.difficulty, job.job_id);
                         current_job_id = job.job_id.clone();
                         
                         // Start mining with new job/target

@@ -26,7 +26,7 @@ pub struct ConnectionConfig {
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            timeout: 60, // 60 second default timeout for mining pools
+            timeout: 120, // 120 second default timeout for mining pools
             max_retries: 3,
             retry_delay: 1,
             keepalive: true,
@@ -210,10 +210,7 @@ impl StratumConnection {
                 Ok(Ok(_)) => {
                     match serde_json::from_str(&line) {
                         Ok(response) => {
-                            let response: JsonRpcResponse = response;
-                            println!("Client received response: {}", line.trim());
-                            println!("Parsed response: {:?}", response);
-                            
+                            let response: JsonRpcResponse = response;                            
                             // Update stats
                             let mut stats = self.stats.lock().await;
                             stats.messages_received += 1;
@@ -325,8 +322,7 @@ impl StratumConnection {
                         // Skip empty lines and try again
                         continue;
                     }
-                    
-                    println!("Server notification: {}", line.trim());
+
                     match serde_json::from_str(&line.trim()) {
                         Ok(value) => {
                             // Update stats
